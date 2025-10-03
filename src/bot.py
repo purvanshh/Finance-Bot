@@ -4,6 +4,7 @@ import telebot                           # Telegram Bot API library
 import google.generativeai as genai        # Google GenAI for generating content
 from flask import Flask
 import threading
+import time
 
 # Load local .env if present and read keys from environment
 load_dotenv()
@@ -55,10 +56,16 @@ def split_message(text, max_length=4000):
     
     return chunks
 
+
+def is_conversation_active(user_id):
+    """Return True if the user has an active session stored in user_data."""
+    return user_id in user_data
+
 @bot.message_handler(commands=["start"])
 def start(message):
     user_id = message.chat.id  # Unique identifier for the user
-    user_data[user_id] = {}    # Initialize an empty dictionary for storing user inputs
+    # initialize session with timestamp and state
+    user_data[user_id] = {"_ts": time.time(), "state": "awaiting_age"}
 
     # Welcome message with an introduction to the financial planning bot
     bot.send_message(
@@ -72,19 +79,45 @@ def start(message):
 
 def get_age(message):
     user_id = message.chat.id
+    # ignore if there's no active session (user may have cancelled)
+    if not is_conversation_active(user_id):
+        bot.send_message(user_id, "No active session. Send /start to begin a new one.")
+        return
+
+    # update timestamp and state
+    user_data.setdefault(user_id, {})
+    user_data[user_id]["_ts"] = time.time()
+    user_data[user_id]["state"] = "awaiting_income"
     user_data[user_id]["age"] = message.text  # Store the user's age
+
     bot.send_message(user_id, "💸 What is your monthly income (in ₹)?")
     bot.register_next_step_handler(message, get_income)
 
 def get_income(message):
     user_id = message.chat.id
+    if not is_conversation_active(user_id):
+        bot.send_message(user_id, "No active session. Send /start to begin a new one.")
+        return
+
+    user_data.setdefault(user_id, {})
+    user_data[user_id]["_ts"] = time.time()
+    user_data[user_id]["state"] = "awaiting_expenses"
     user_data[user_id]["income"] = message.text  # Store the monthly income
+
     bot.send_message(user_id, "What are your monthly expenses (in ₹)?")
     bot.register_next_step_handler(message, get_expenses)
 
 def get_expenses(message):
     user_id = message.chat.id
+    if not is_conversation_active(user_id):
+        bot.send_message(user_id, "No active session. Send /start to begin a new one.")
+        return
+
+    user_data.setdefault(user_id, {})
+    user_data[user_id]["_ts"] = time.time()
+    user_data[user_id]["state"] = "awaiting_goals"
     user_data[user_id]["expenses"] = message.text  # Store the monthly expenses
+
     bot.send_message(
         user_id,
         "What are your financial goals?\n"
@@ -94,6 +127,13 @@ def get_expenses(message):
 
 def get_goals(message):
     user_id = message.chat.id
+    if not is_conversation_active(user_id):
+        bot.send_message(user_id, "No active session. Send /start to begin a new one.")
+        return
+
+    user_data.setdefault(user_id, {})
+    user_data[user_id]["_ts"] = time.time()
+    user_data[user_id]["state"] = "generating_advice"
     user_data[user_id]["goals"] = message.text  # Store the financial goals
 
     # Retrieve all collected data for this user
@@ -141,6 +181,10 @@ def get_goals(message):
                     bot.send_message(user_id, chunk)
                 else:
                     bot.send_message(user_id, f"📊 Continued...\n\n{chunk}")
+
+            # Conversation finished: clear session and confirm
+            user_data.pop(user_id, None)
+            bot.send_message(user_id, "✅ Done. Send /start if you want another personalized plan.")
         else:
             bot.send_message(user_id, "⚠️ No response generated. Please try again!")
             
@@ -148,6 +192,15 @@ def get_goals(message):
         # If there is an error during content generation, notify the user with more details
         print(f"Error generating advice for user {user_id}: {str(e)}")
         bot.send_message(user_id, f"⚠️ Error generating advice: {str(e)}\n\nPlease try again or contact support if this persists.")
+
+
+@bot.message_handler(commands=["cancel", "end", "stop"])
+def cancel_conversation(message):
+    user_id = message.chat.id
+    if user_data.pop(user_id, None):
+        bot.send_message(user_id, "🛑 Conversation ended. Send /start whenever you're ready to begin again.")
+    else:
+        bot.send_message(user_id, "No active conversation. Send /start to begin a new one.")
 
 def run_bot():
     bot.infinity_polling()
@@ -159,6 +212,23 @@ def health():
     return "Finance Bot is running"
 
 if __name__ == "__main__":
+    # Start background cleanup thread to remove stale sessions
+    def cleanup_sessions(expiry_seconds=600, sleep_seconds=60):
+        while True:
+            now = time.time()
+            for uid, data in list(user_data.items()):
+                ts = data.get('_ts')
+                if ts and now - ts > expiry_seconds:
+                    user_data.pop(uid, None)
+                    try:
+                        bot.send_message(uid, "⏳ Your session timed out due to inactivity. Send /start to begin again.")
+                    except Exception:
+                        pass
+            time.sleep(sleep_seconds)
+
+    cleanup_thread = threading.Thread(target=cleanup_sessions, daemon=True)
+    cleanup_thread.start()
+
     # Start bot in background thread
     t = threading.Thread(target=run_bot, daemon=True)
     t.start()
