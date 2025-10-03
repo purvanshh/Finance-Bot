@@ -1,0 +1,11 @@
+services:
+  - type: "worker"
+    name: "finance-bot-worker"
+    env: "python"
+    envVersion: "3"
+    plan: "free" # choose plan in Render UI if needed
+    repo: "https://github.com/purvanshh/Finance-Bot"
+    branch: "main"
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python src/check_env.py && python \"src/Telegram Phase 3 Fixed.py\""
+    # NOTE: Do NOT put secrets here. Configure them in the Render dashboard under Environment.
